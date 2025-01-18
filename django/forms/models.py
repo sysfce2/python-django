@@ -11,6 +11,7 @@ from django.core.exceptions import (
     ImproperlyConfigured,
     ValidationError,
 )
+from django.core.validators import ProhibitNullCharactersValidator
 from django.db.models.utils import AltersData
 from django.forms.fields import ChoiceField, Field
 from django.forms.forms import BaseForm, DeclarativeFieldsMetaclass
@@ -23,6 +24,7 @@ from django.forms.widgets import (
     SelectMultiple,
 )
 from django.utils.choices import BaseChoiceIterator
+from django.utils.hashable import make_hashable
 from django.utils.text import capfirst, get_text_list
 from django.utils.translation import gettext
 from django.utils.translation import gettext_lazy as _
@@ -834,8 +836,8 @@ class BaseModelFormSet(BaseFormSet, AltersData):
                     (
                         d._get_pk_val()
                         if hasattr(d, "_get_pk_val")
-                        # Prevent "unhashable type: list" errors later on.
-                        else tuple(d) if isinstance(d, list) else d
+                        # Prevent "unhashable type" errors later on.
+                        else make_hashable(d)
                     )
                     for d in row_data
                 )
@@ -933,7 +935,7 @@ class BaseModelFormSet(BaseFormSet, AltersData):
             # 1. The object is an unexpected empty model, created by invalid
             #    POST data such as an object outside the formset's queryset.
             # 2. The object was already deleted from the database.
-            if obj.pk is None:
+            if not obj._is_pk_set():
                 continue
             if form in forms_to_delete:
                 self.deleted_objects.append(obj)
@@ -1101,7 +1103,7 @@ class BaseInlineFormSet(BaseModelFormSet):
         self.save_as_new = save_as_new
         if queryset is None:
             queryset = self.model._default_manager
-        if self.instance.pk is not None:
+        if self.instance._is_pk_set():
             qs = queryset.filter(**{self.fk.name: self.instance})
         else:
             qs = queryset.none()
@@ -1486,6 +1488,10 @@ class ModelChoiceField(ChoiceField):
         self.limit_choices_to = limit_choices_to  # limit the queryset later.
         self.to_field_name = to_field_name
 
+    def validate_no_null_characters(self, value):
+        non_null_character_validator = ProhibitNullCharactersValidator()
+        return non_null_character_validator(value)
+
     def get_limit_choices_to(self):
         """
         Return ``limit_choices_to`` for this form field.
@@ -1550,6 +1556,7 @@ class ModelChoiceField(ChoiceField):
     def to_python(self, value):
         if value in self.empty_values:
             return None
+        self.validate_no_null_characters(value)
         try:
             key = self.to_field_name or "pk"
             if isinstance(value, self.queryset.model):
@@ -1630,6 +1637,7 @@ class ModelMultipleChoiceField(ModelChoiceField):
                 code="invalid_list",
             )
         for pk in value:
+            self.validate_no_null_characters(pk)
             try:
                 self.queryset.filter(**{key: pk})
             except (ValueError, TypeError):

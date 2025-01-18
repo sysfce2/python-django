@@ -71,21 +71,11 @@ class DatabaseFeatures(BaseDatabaseFeatures):
 
     @cached_property
     def test_collations(self):
-        charset = "utf8"
-        if (
-            self.connection.mysql_is_mariadb
-            and self.connection.mysql_version >= (10, 6)
-        ) or (
-            not self.connection.mysql_is_mariadb
-            and self.connection.mysql_version >= (8, 0, 30)
-        ):
-            # utf8 is an alias for utf8mb3 in MariaDB 10.6+ and MySQL 8.0.30+.
-            charset = "utf8mb3"
         return {
-            "ci": f"{charset}_general_ci",
-            "non_default": f"{charset}_esperanto_ci",
-            "swedish_ci": f"{charset}_swedish_ci",
-            "virtual": f"{charset}_esperanto_ci",
+            "ci": "utf8mb4_general_ci",
+            "non_default": "utf8mb4_esperanto_ci",
+            "swedish_ci": "utf8mb4_swedish_ci",
+            "virtual": "utf8mb4_esperanto_ci",
         }
 
     test_now_utc_template = "UTC_TIMESTAMP(6)"
@@ -98,10 +88,6 @@ class DatabaseFeatures(BaseDatabaseFeatures):
                 "test_coalesce_workaround",
                 "db_functions.comparison.test_least.LeastTests."
                 "test_coalesce_workaround",
-            },
-            "Running on MySQL requires utf8mb4 encoding (#18392).": {
-                "model_fields.test_textfield.TextFieldTests.test_emoji",
-                "model_fields.test_charfield.TestCharField.test_emoji",
             },
             "MySQL doesn't support functional indexes on a function that "
             "returns JSON": {
@@ -155,6 +141,18 @@ class DatabaseFeatures(BaseDatabaseFeatures):
                     "MySQL < 8.0.31": {
                         "queries.test_qs_combinators.QuerySetSetOperationTests."
                         "test_union_nested"
+                    },
+                }
+            )
+        if not self.connection.mysql_is_mariadb:
+            skips.update(
+                {
+                    "MySQL doesn't allow renaming columns referenced by generated "
+                    "columns": {
+                        "migrations.test_operations.OperationTests."
+                        "test_invalid_generated_field_changes_on_rename_stored",
+                        "migrations.test_operations.OperationTests."
+                        "test_invalid_generated_field_changes_on_rename_virtual",
                     },
                 }
             )

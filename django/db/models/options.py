@@ -1,13 +1,20 @@
 import bisect
 import copy
-import inspect
 from collections import defaultdict
 
 from django.apps import apps
 from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
+from django.core.signals import setting_changed
 from django.db import connections
-from django.db.models import AutoField, Manager, OrderWrt, UniqueConstraint
+from django.db.models import (
+    AutoField,
+    CompositePrimaryKey,
+    Manager,
+    OrderWrt,
+    UniqueConstraint,
+)
+from django.db.models.fields import composite
 from django.db.models.query_utils import PathInfo
 from django.utils.datastructures import ImmutableList, OrderedSet
 from django.utils.functional import cached_property
@@ -203,10 +210,9 @@ class Options:
             self.unique_together = normalize_together(self.unique_together)
             # App label/class name interpolation for names of constraints and
             # indexes.
-            if not getattr(cls._meta, "abstract", False):
-                for attr_name in {"constraints", "indexes"}:
-                    objs = getattr(self, attr_name, [])
-                    setattr(self, attr_name, self._format_names_with_class(cls, objs))
+            if not self.abstract:
+                self.constraints = self._format_names(self.constraints)
+                self.indexes = self._format_names(self.indexes)
 
             # verbose_name_plural is a special case because it uses a 's'
             # by default.
@@ -232,15 +238,16 @@ class Options:
                 self.db_table, connection.ops.max_name_length()
             )
 
-    def _format_names_with_class(self, cls, objs):
+        if self.swappable:
+            setting_changed.connect(self.setting_changed)
+
+    def _format_names(self, objs):
         """App label/class name interpolation for object names."""
+        names = {"app_label": self.app_label.lower(), "class": self.model_name}
         new_objs = []
         for obj in objs:
             obj = obj.clone()
-            obj.name = obj.name % {
-                "app_label": cls._meta.app_label.lower(),
-                "class": cls.__name__.lower(),
-            }
+            obj.name %= names
             new_objs.append(obj)
         return new_objs
 
@@ -403,7 +410,7 @@ class Options:
         with override(None):
             return str(self.verbose_name)
 
-    @property
+    @cached_property
     def swapped(self):
         """
         Has this model been swapped out for another? If so, return the model
@@ -430,6 +437,10 @@ class Options:
                 ):
                     return swapped_for
         return None
+
+    def setting_changed(self, *, setting, **kwargs):
+        if setting == self.swappable and "swapped" in self.__dict__:
+            del self.swapped
 
     @cached_property
     def managers(self):
@@ -970,13 +981,25 @@ class Options:
         ]
 
     @cached_property
+    def pk_fields(self):
+        return composite.unnest([self.pk])
+
+    @property
+    def is_composite_pk(self):
+        return isinstance(self.pk, CompositePrimaryKey)
+
+    @cached_property
     def _property_names(self):
         """Return a set of the names of the properties defined on the model."""
-        names = []
-        for name in dir(self.model):
-            attr = inspect.getattr_static(self.model, name)
-            if isinstance(attr, property):
-                names.append(name)
+        names = set()
+        seen = set()
+        for klass in self.model.__mro__:
+            names |= {
+                name
+                for name, value in klass.__dict__.items()
+                if isinstance(value, property) and name not in seen
+            }
+            seen |= set(klass.__dict__)
         return frozenset(names)
 
     @cached_property
@@ -985,8 +1008,11 @@ class Options:
         Return a set of the non-pk concrete field names defined on the model.
         """
         names = []
+        all_pk_fields = set(self.pk_fields)
+        for parent in self.all_parents:
+            all_pk_fields.update(parent._meta.pk_fields)
         for field in self.concrete_fields:
-            if not field.primary_key:
+            if field not in all_pk_fields:
                 names.append(field.name)
                 if field.name != field.attname:
                     names.append(field.attname)

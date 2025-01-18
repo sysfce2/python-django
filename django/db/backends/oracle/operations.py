@@ -3,7 +3,7 @@ import uuid
 from functools import lru_cache
 
 from django.conf import settings
-from django.db import DatabaseError, NotSupportedError
+from django.db import NotSupportedError
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.utils import split_tzname_delta, strip_quotes, truncate_name
 from django.db.models import AutoField, Exists, ExpressionWrapper, Lookup
@@ -295,13 +295,6 @@ END;
         columns = []
         for param in returning_params:
             value = param.get_value()
-            if value == []:
-                raise DatabaseError(
-                    "The database did not return a new row id. Probably "
-                    '"ORA-1403: no data found" was raised internally but was '
-                    "hidden by the Oracle OCI library (see "
-                    "https://code.djangoproject.com/ticket/28859)."
-                )
             columns.append(value[0])
         return tuple(columns)
 
@@ -627,9 +620,6 @@ END;
             1900, 1, 1, value.hour, value.minute, value.second, value.microsecond
         )
 
-    def adapt_decimalfield_value(self, value, max_digits=None, decimal_places=None):
-        return value
-
     def combine_expression(self, connector, sub_expressions):
         lhs, rhs = sub_expressions
         if connector == "%%":
@@ -669,18 +659,20 @@ END;
         return self._get_no_autofield_sequence_name(table) if row is None else row[0]
 
     def bulk_insert_sql(self, fields, placeholder_rows):
+        field_placeholders = [
+            BulkInsertMapper.types.get(
+                getattr(field, "target_field", field).get_internal_type(), "%s"
+            )
+            for field in fields
+            if field
+        ]
         query = []
         for row in placeholder_rows:
             select = []
             for i, placeholder in enumerate(row):
                 # A model without any fields has fields=[None].
                 if fields[i]:
-                    internal_type = getattr(
-                        fields[i], "target_field", fields[i]
-                    ).get_internal_type()
-                    placeholder = (
-                        BulkInsertMapper.types.get(internal_type, "%s") % placeholder
-                    )
+                    placeholder = field_placeholders[i] % placeholder
                 # Add columns aliases to the first select to avoid "ORA-00918:
                 # column ambiguously defined" when two or more columns in the
                 # first select have the same value.

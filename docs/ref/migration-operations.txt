@@ -195,6 +195,16 @@ if the field is nullable or if it has a default value that can be used to
 populate the recreated column. If the field is not nullable and does not have a
 default value, the operation is irreversible.
 
+.. admonition:: PostgreSQL
+
+    ``RemoveField`` will also delete any additional database objects that are
+    related to the removed field (like views, for example). This is because the
+    resulting ``DROP COLUMN`` statement will include the ``CASCADE`` clause to
+    ensure `dependent objects outside the table are also dropped`_.
+
+.. _dependent objects outside the table are also dropped: https://www.postgresql.org/docs/current/sql-altertable.html#SQL-ALTERTABLE-PARMS-CASCADE
+
+
 ``AlterField``
 --------------
 
@@ -267,6 +277,16 @@ the model with ``model_name``.
 .. class:: RemoveConstraint(model_name, name)
 
 Removes the constraint named ``name`` from the model with ``model_name``.
+
+``AlterConstraint``
+-------------------
+
+.. versionadded:: 5.2
+
+.. class:: AlterConstraint(model_name, name, constraint)
+
+Alters the constraint named ``name`` of the model with ``model_name`` with the
+new ``constraint`` without affecting the database.
 
 Special Operations
 ==================
@@ -477,8 +497,6 @@ For an example using ``SeparateDatabaseAndState``, see
 
 Operation category
 ==================
-
-.. versionadded:: 5.1
 
 .. currentmodule:: django.db.migrations.operations.base
 
