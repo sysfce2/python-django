@@ -219,6 +219,7 @@ class MigrationAutodetector:
         self.generate_altered_unique_together()
         self.generate_added_indexes()
         self.generate_added_constraints()
+        self.generate_altered_constraints()
         self.generate_altered_db_table()
 
         self._sort_migrations()
@@ -1126,16 +1127,20 @@ class MigrationAutodetector:
                     self.to_state,
                 )
             )
+        if field.generated:
+            dependencies.extend(self._get_dependencies_for_generated_field(field))
         # You can't just add NOT NULL fields with no default or fields
         # which don't allow empty strings as default.
         time_fields = (models.DateField, models.DateTimeField, models.TimeField)
+        auto_fields = (models.AutoField, models.SmallAutoField, models.BigAutoField)
         preserve_default = (
             field.null
             or field.has_default()
-            or field.db_default is not models.NOT_PROVIDED
+            or field.has_db_default()
             or field.many_to_many
             or (field.blank and field.empty_strings_allowed)
             or (isinstance(field, time_fields) and field.auto_now)
+            or (isinstance(field, auto_fields))
         )
         if not preserve_default:
             field = field.clone()
@@ -1147,11 +1152,7 @@ class MigrationAutodetector:
                 field.default = self.questioner.ask_not_null_addition(
                     field_name, model_name
                 )
-        if (
-            field.unique
-            and field.default is not models.NOT_PROVIDED
-            and callable(field.default)
-        ):
+        if field.unique and field.has_default() and callable(field.default):
             self.questioner.ask_unique_callable_default_addition(field_name, model_name)
         self.add_operation(
             app_label,
@@ -1293,7 +1294,7 @@ class MigrationAutodetector:
                         old_field.null
                         and not new_field.null
                         and not new_field.has_default()
-                        and new_field.db_default is models.NOT_PROVIDED
+                        and not new_field.has_db_default()
                         and not new_field.many_to_many
                     ):
                         field = new_field.clone()
@@ -1448,6 +1449,19 @@ class MigrationAutodetector:
                     ),
                 )
 
+    def _constraint_should_be_dropped_and_recreated(
+        self, old_constraint, new_constraint
+    ):
+        old_path, old_args, old_kwargs = old_constraint.deconstruct()
+        new_path, new_args, new_kwargs = new_constraint.deconstruct()
+
+        for attr in old_constraint.non_db_attrs:
+            old_kwargs.pop(attr, None)
+        for attr in new_constraint.non_db_attrs:
+            new_kwargs.pop(attr, None)
+
+        return (old_path, old_args, old_kwargs) != (new_path, new_args, new_kwargs)
+
     def create_altered_constraints(self):
         option_name = operations.AddConstraint.option_name
         for app_label, model_name in sorted(self.kept_model_keys):
@@ -1459,14 +1473,41 @@ class MigrationAutodetector:
 
             old_constraints = old_model_state.options[option_name]
             new_constraints = new_model_state.options[option_name]
-            add_constraints = [c for c in new_constraints if c not in old_constraints]
-            rem_constraints = [c for c in old_constraints if c not in new_constraints]
+
+            alt_constraints = []
+            alt_constraints_name = []
+
+            for old_c in old_constraints:
+                for new_c in new_constraints:
+                    old_c_dec = old_c.deconstruct()
+                    new_c_dec = new_c.deconstruct()
+                    if (
+                        old_c_dec != new_c_dec
+                        and old_c.name == new_c.name
+                        and not self._constraint_should_be_dropped_and_recreated(
+                            old_c, new_c
+                        )
+                    ):
+                        alt_constraints.append(new_c)
+                        alt_constraints_name.append(new_c.name)
+
+            add_constraints = [
+                c
+                for c in new_constraints
+                if c not in old_constraints and c.name not in alt_constraints_name
+            ]
+            rem_constraints = [
+                c
+                for c in old_constraints
+                if c not in new_constraints and c.name not in alt_constraints_name
+            ]
 
             self.altered_constraints.update(
                 {
                     (app_label, model_name): {
                         "added_constraints": add_constraints,
                         "removed_constraints": rem_constraints,
+                        "altered_constraints": alt_constraints,
                     }
                 }
             )
@@ -1499,6 +1540,23 @@ class MigrationAutodetector:
                         model_name=model_name,
                         name=constraint.name,
                     ),
+                )
+
+    def generate_altered_constraints(self):
+        for (
+            app_label,
+            model_name,
+        ), alt_constraints in self.altered_constraints.items():
+            dependencies = self._get_dependencies_for_model(app_label, model_name)
+            for constraint in alt_constraints["altered_constraints"]:
+                self.add_operation(
+                    app_label,
+                    operations.AlterConstraint(
+                        model_name=model_name,
+                        name=constraint.name,
+                        constraint=constraint,
+                    ),
+                    dependencies=dependencies,
                 )
 
     @staticmethod
@@ -1545,6 +1603,27 @@ class MigrationAutodetector:
                     OperationDependency.Type.CREATE,
                 )
             )
+        return dependencies
+
+    def _get_dependencies_for_generated_field(self, field):
+        dependencies = []
+        referenced_base_fields = models.Q(field.expression).referenced_base_fields
+        newly_added_fields = sorted(self.new_field_keys - self.old_field_keys)
+        for app_label, model_name, added_field_name in newly_added_fields:
+            added_field = self.to_state.models[app_label, model_name].get_field(
+                added_field_name
+            )
+            if (
+                added_field.remote_field and added_field.remote_field.model
+            ) or added_field.name in referenced_base_fields:
+                dependencies.append(
+                    OperationDependency(
+                        app_label,
+                        model_name,
+                        added_field.name,
+                        OperationDependency.Type.CREATE,
+                    )
+                )
         return dependencies
 
     def _get_dependencies_for_model(self, app_label, model_name):

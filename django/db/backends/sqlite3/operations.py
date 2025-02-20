@@ -36,6 +36,16 @@ class DatabaseOperations(BaseDatabaseOperations):
         If there's only a single field to insert, the limit is 500
         (SQLITE_MAX_COMPOUND_SELECT).
         """
+        fields = list(
+            chain.from_iterable(
+                (
+                    field.fields
+                    if isinstance(field, models.CompositePrimaryKey)
+                    else [field]
+                )
+                for field in fields
+            )
+        )
         if len(fields) == 1:
             return 500
         elif len(fields) > 1:
@@ -352,11 +362,6 @@ class DatabaseOperations(BaseDatabaseOperations):
 
     def convert_booleanfield_value(self, value, expression, connection):
         return bool(value) if value in (1, 0) else value
-
-    def bulk_insert_sql(self, fields, placeholder_rows):
-        placeholder_rows_sql = (", ".join(row) for row in placeholder_rows)
-        values_sql = ", ".join(f"({sql})" for sql in placeholder_rows_sql)
-        return f"VALUES {values_sql}"
 
     def combine_expression(self, connector, sub_expressions):
         # SQLite doesn't have a ^ operator, so use the user-defined POWER
